@@ -104,6 +104,107 @@ CONSTRAINTS
 """
 
 
+"""
+PHASE 3 — MULTIPLE FUNCTION CALLS
+
+PROJECT
+AI Warehouse Inventory Assistant
+
+OBJECTIVE
+Extend the existing application to handle multiple
+independent function calls within a single model response.
+
+BUSINESS SCENARIO
+Warehouse employees often need different inventory
+information in a single request.
+
+The assistant must retrieve all requested information
+and provide one complete, accurate response.
+
+FUNCTIONAL REQUIREMENTS
+
+1. Preserve all functionality from Phases 1 and 2.
+
+2. Support user requests that require more than one
+   inventory operation.
+
+3. Process every function call returned by the model,
+   rather than handling only the first one.
+
+4. Execute the appropriate Python function for each call.
+
+5. Associate each function result with its corresponding
+   function call.
+
+6. Return all function results to the model.
+
+7. Generate one final response addressing every part
+   of the original user request.
+
+8. Preserve existing validation and error handling.
+
+INPUTS
+Natural-language inventory questions containing
+one or more independent requests.
+
+OUTPUTS
+A complete natural-language answer containing
+all requested inventory information.
+
+ACCEPTANCE TESTS
+
+Test 1 — Multiple Operations
+Question:
+"How many units of PID-2 are available, and which
+products have fewer than 2 units?"
+
+Expected:
+- Retrieve PID-2 availability.
+- Identify products below the specified threshold.
+- Include both results in the final answer.
+
+Test 2 — Single Operation
+Question:
+"What is the availability of PID-4?"
+
+Expected:
+Process one function call correctly.
+
+Test 3 — No Tool Required
+Question:
+"Hello!"
+
+Expected:
+Respond without executing inventory functions.
+
+Test 4 — Independent Results
+Question:
+"Which products have fewer than 3 units, and
+what is the name of PID-1?"
+
+Expected:
+Execute the required operations and return
+both results accurately.
+
+Test 5 — Invalid Product
+Question:
+"What is the availability of PID-99, and
+which products have fewer than 2 units?"
+
+Expected:
+Report the unknown product while still returning
+the valid low-stock information.
+
+CONSTRAINTS
+- Python and OpenAI Responses API.
+- Reuse the existing two tools.
+- No additional inventory tools.
+- No FastAPI, database or agent frameworks.
+- No dependent or sequential tool execution chains.
+- No implementation code is provided.
+"""
+
+
 from openai import OpenAI
 import json
 
@@ -192,51 +293,53 @@ instructions=(
     "Respond in plain text without Markdown formatting."
 ),
 input = text,
-tools = tool,
-parallel_tool_calls=False )
+tools = tool )
 
-tool_call = None
+total_calls = []
 for item in response.output:
     if item.type == 'function_call':
-        tool_call = item
-        break
+        total_calls.append(item)
 
-if tool_call is None:
+
+if total_calls == []:
     print(response.output_text)
 else:
-    print(tool_call.name, tool_call.arguments)
-    if tool_call.name == 'retrieve_data':
-        arguments = json.loads(tool_call.arguments)
-        product = arguments['product']
+    tool_output = []
+    for tool_call in total_calls :
 
-        if product.strip() == '':
-            result = {'found': False, 'error': 'Empty product id'}
+        if tool_call.name == 'retrieve_data':
+            arguments = json.loads(tool_call.arguments)
+            product = arguments['product']
+
+            if product.strip() == '':
+                result = {'found': False, 'error': 'Empty product id'}
+            else:
+                result = retrieve_data(product)
+
+        elif tool_call.name == 'get_quantity':
+            arguments = json.loads(tool_call.arguments)
+            units = arguments['units']
+
+            if units < 0 :
+                result = {'found': False, 'error': 'Negative number'}
+            else:
+                result = get_quantity(units)
         else:
-            result = retrieve_data(product)
+            raise ValueError('Unsupported tool')
 
-    elif tool_call.name == 'get_quantity':
-        arguments = json.loads(tool_call.arguments)
-        units = arguments['units']
-
-        if units < 0 :
-            result = {'found': False, 'error': 'Negative number'}
-        else:
-            result = get_quantity(units)
-    else:
-        raise ValueError('Unsupported tool')
+        tool_output.append({
+            "type": "function_call_output",
+            "call_id": tool_call.call_id,
+            "output": json.dumps(result)})
 
 
-    tool_output = {
-    "type": "function_call_output",
-    "call_id": tool_call.call_id,
-    "output": json.dumps(result)}
 
     second_response = client.responses.create(
     model="gpt-6-luna",
     reasoning={"effort": "none"},
     instructions="Respond in plain text without Markdown formatting.",
     previous_response_id = response.id,
-    input=[tool_output])
+    input=tool_output)
 
     if second_response.output_text:
         print(second_response.output_text)
