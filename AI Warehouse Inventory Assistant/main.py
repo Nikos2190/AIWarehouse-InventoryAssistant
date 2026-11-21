@@ -1,5 +1,10 @@
-
-from openai import OpenAI
+from openai import (
+    OpenAI,
+    APIConnectionError,
+    APITimeoutError,
+    RateLimitError,
+    APIStatusError
+)
 import json
 
 storage_data = {'PID-1':{
@@ -94,7 +99,7 @@ instruct = ("You are a warehouse inventory assistant. "
 "If the user asks about low stock without specifying a numeric threshold, "
 "ask them to provide the threshold before using any tool. "
 "Do not assume a threshold. "
-"Respond in plain text without Markdown formatting."
+"Respond in plain text without Markdown formatting. "
 "For every shipping cost calculation, always use the shipping tool. "
 "Never calculate shipping costs yourself. "
 "When the user requests shipping for all available units of a product, "
@@ -103,82 +108,98 @@ instruct = ("You are a warehouse inventory assistant. "
 
 client = OpenAI()
 
-response = client.responses.create(
-    model = 'gpt-6-luna',
-reasoning={"effort": "none"},
-instructions= instruct,
-input = text,
-tools = tool )
+try:
+    response = client.responses.create(
+        model = 'gpt-6-luna',
+    reasoning={"effort": "none"},
+    instructions= instruct,
+    input = text,
+    tools = tool )
 
-repeats = 0
-while repeats < 10:
-    total_calls = []
-    for item in response.output:
-        if item.type == 'function_call':
-            total_calls.append(item)
+    repeats = 0
+    while repeats < 10:
+        total_calls = []
+        for item in response.output:
+            if item.type == 'function_call':
+                total_calls.append(item)
 
 
-    if total_calls == []:
-        print(response.output_text)
-        break
-    else:
-        tool_output = []
-        for tool_call in total_calls :
-            print("Tool executed:", tool_call.name, tool_call.arguments)
+        if total_calls == []:
+            print(response.output_text)
+            break
+        else:
+            tool_output = []
+            for tool_call in total_calls:
+                print("Tool executed:", tool_call.name, tool_call.arguments)
 
-            if tool_call.name == 'retrieve_data':
-                arguments = json.loads(tool_call.arguments)
-                product = arguments['product']
+                try:
+                    arguments = json.loads(tool_call.arguments)
 
-                if product.strip() == '':
-                    result = {'found': False, 'error': 'Empty product id'}
+                except json.JSONDecodeError:
+                    result = {"error": "Invalid JSON arguments"}
+
                 else:
-                    result = retrieve_data(product)
+                    if tool_call.name == 'retrieve_data':
+                        product = arguments['product']
 
-            elif tool_call.name == 'get_quantity':
-                arguments = json.loads(tool_call.arguments)
-                units = arguments['units']
+                        if product.strip() == '':
+                            result = {'found': False, 'error': 'Empty product id'}
+                        else:
+                            result = retrieve_data(product)
 
-                if units < 0 :
-                    result = {'found': False, 'error': 'Negative number'}
-                else:
-                    result = get_quantity(units)
+                    elif tool_call.name == 'get_quantity':
+                        units = arguments['units']
 
-            elif tool_call.name == 'shipping':
-                arguments = json.loads(tool_call.arguments)
-                units = arguments['units']
-                ship_method = arguments['ship_method']
-                result = shipping(units,ship_method)
+                        if units < 0:
+                            result = {'found': False, 'error': 'Negative number'}
+                        else:
+                            result = get_quantity(units)
 
-            else:
-                raise ValueError('Unsupported tool')
+                    elif tool_call.name == 'shipping':
+                        units = arguments['units']
+                        ship_method = arguments['ship_method']
+                        result = shipping(units, ship_method)
 
-            tool_output.append({
-                "type": "function_call_output",
-                "call_id": tool_call.call_id,
-                "output": json.dumps(result)})
+                    else:
+                        raise ValueError('Unsupported tool')
+
+                tool_output.append({
+                    "type": "function_call_output",
+                    "call_id": tool_call.call_id,
+                    "output": json.dumps(result)
+                })
+
+            second_response = client.responses.create(
+            model="gpt-6-luna",
+            reasoning={"effort": "none"},
+            instructions= instruct,
+            previous_response_id = response.id,
+            tools = tool,
+            input=tool_output)
 
 
+            response = second_response
+            repeats += 1
 
-        second_response = client.responses.create(
-        model="gpt-6-luna",
-        reasoning={"effort": "none"},
-        instructions= instruct,
-        previous_response_id = response.id,
-        tools = tool,
-        input=tool_output)
+    if repeats == 10:
+        if response.output_text and not any(
+                item.type == "function_call" for item in response.output
+        ):
+            print(response.output_text)
+        else:
+            print("Maximum tool-calling iterations reached. Request not completed.")
 
 
-        response = second_response
-        repeats += 1
+except APITimeoutError :
+    print("The OpenAI API request timed out. Please try again later.")
+except APIConnectionError:
+    print("Connection to OpenAI failed.")
+except RateLimitError:
+    print("OpenAI API rate limit exceeded. Please try again later.")
+except APIStatusError as e:
+    print(f"OpenAI API request failed with HTTP status {e.status_code}.")
 
-if repeats == 10:
-    if response.output_text and not any(
-        item.type == "function_call" for item in response.output
-    ):
-        print(response.output_text)
-    else:
-        print("Maximum tool-calling iterations reached. Request not completed.")
+
 
 
 
